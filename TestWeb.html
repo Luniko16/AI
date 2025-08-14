@@ -1,109 +1,163 @@
-import React, { useState, useEffect } from "react";
+# app.py
+import os
+import streamlit as st
+from dotenv import load_dotenv
+import openai
+import markdown2
+from PyPDF2 import PdfWriter
+from io import BytesIO
+import requests
 
-export default function App() {
-  const [prompt, setPrompt] = useState("");
-  const [imageUrl, setImageUrl] = useState("");
-  const [imageBlob, setImageBlob] = useState(null);
-  const [loading, setLoading] = useState(false);
+# Load API keys
+load_dotenv()
+openai.api_key = os.getenv("OPENAI_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
-  useEffect(() => {
-    return () => {
-      if (imageUrl) URL.revokeObjectURL(imageUrl);
-    };
-  }, [imageUrl]);
+# Initialize session state
+if 'generated_content' not in st.session_state:
+    st.session_state.generated_content = ""
 
-  async function generateImage() {
-    setLoading(true);
-    try {
-      const fetchUrl = prompt.trim()
-        ? `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}`
-        : "https://picsum.photos/1024/768";
-
-      const res = await fetch(fetchUrl, { mode: "cors" });
-      if (!res.ok) throw new Error("Image fetch failed");
-
-      const blob = await res.blob();
-      const objUrl = URL.createObjectURL(blob);
-      setImageBlob(blob);
-      setImageUrl(objUrl);
-    } catch {
-      alert("Failed to generate image.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function downloadPNG() {
-    if (imageBlob) {
-      const a = document.createElement("a");
-      const url = URL.createObjectURL(imageBlob);
-      a.href = url;
-      a.download = "generated-image.png";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    }
-  }
-
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-purple-200 via-pink-100 to-yellow-100 p-6">
-      <div className="w-full max-w-4xl bg-white shadow-lg rounded-3xl p-8 space-y-6">
-        <h1 className="text-3xl font-bold text-center text-indigo-700">
-          AI Visual Content Generator
-        </h1>
-
-        <div className="flex flex-col sm:flex-row gap-4">
-          <input
-            className="flex-1 p-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            placeholder="Describe your image..."
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-          />
-          <button
-            className="px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-medium disabled:opacity-60"
-            onClick={generateImage}
-            disabled={loading}
-          >
-            {loading ? "Generating..." : "Generate"}
-          </button>
-          <button
-            className="px-6 py-3 rounded-xl bg-green-600 hover:bg-green-700 text-white font-medium disabled:opacity-60"
-            onClick={downloadPNG}
-            disabled={!imageBlob}
-          >
-            Download PNG
-          </button>
-        </div>
-
-        <div className="flex flex-col space-y-4 bg-gray-50 rounded-xl p-4">
-          <h2 className="text-lg font-semibold text-gray-700">Prompt Tips</h2>
-          <ul className="list-disc list-inside text-gray-600 space-y-1">
-            <li>Be specific about the scene, objects, and mood.</li>
-            <li>Include styles like "oil painting" or "cyberpunk" for unique looks.</li>
-            <li>Mention lighting or color tones for better results.</li>
-            <li>Combine multiple concepts for creative images.</li>
-          </ul>
-        </div>
-
-        <div className="flex justify-center">
-          <div className="w-full bg-gray-50 rounded-xl shadow-inner p-3 flex items-center justify-center min-h-[300px]">
-            {imageUrl ? (
-              <img
-                src={imageUrl}
-                alt="generated"
-                className="max-w-full max-h-[480px] rounded-lg"
-                crossOrigin="anonymous"
-              />
-            ) : (
-              <div className="text-gray-400">No image yet</div>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+# Model selection
+MODELS = {
+    "GPT-4": "gpt-4-turbo",
+    "DeepSeek": "deepseek-chat",
+    "CodeLlama (if available)": "codellama-34b"
 }
+
+# Documentation templates
+TEMPLATES = {
+    "API Documentation": {
+        "prompt": """Generate OpenAPI 3.0 documentation for:
+Endpoint: {endpoint}
+Method: {method}
+Parameters: {params}
+Request Body: {request_body}
+Response: {response}
+Include code samples in {languages}.
+Use {style} style documentation.""",
+        "fields": ["endpoint", "method", "params", "request_body", "response", "languages", "style"]
+    },
+    "Code Explanation": {
+        "prompt": """Analyze this {language} code:
+{code}
+Generate:
+1. High-level summary
+2. Inline comments
+3. Function docstring in {docstyle} format
+Target audience: {audience}""",
+        "fields": ["language", "code", "docstyle", "audience"]
+    },
+    "Technical Tutorial": {
+        "prompt": """Create a {level}-friendly tutorial about {topic}.
+Structure:
+1. Prerequisites
+2. Step-by-step instructions
+3. Common pitfalls
+4. Further reading
+Tone: {tone}
+Include code examples in {language}.""",
+        "fields": ["level", "topic", "tone", "language"]
+    }
+}
+
+# UI Layout
+st.set_page_config(page_title="TechDocs AI", layout="wide")
+st.title("🚀 AI Technical Documentation Generator")
+
+# Sidebar controls
+with st.sidebar:
+    st.header("Configuration")
+    selected_model = st.selectbox("AI Model", list(MODELS.keys()))
+    doc_type = st.selectbox("Documentation Type", list(TEMPLATES.keys()))
+    detail_level = st.select_slider("Detail Level", ["Brief", "Standard", "Detailed"])
+    audience_level = st.radio("Target Audience", ["Beginner", "Intermediate", "Expert"])
+    
+# Main content area
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.subheader("Input Parameters")
+    
+    # Dynamic form based on template
+    inputs = {}
+    template = TEMPLATES[doc_type]
+    for field in template["fields"]:
+        if field == "language":
+            inputs[field] = st.multiselect(
+                "Programming Languages",
+                ["Python", "JavaScript", "Java", "Go", "C++"],
+                default=["Python", "JavaScript"]
+            )
+        elif field == "code":
+            inputs[field] = st.text_area("Paste your code here", height=200)
+        else:
+            inputs[field] = st.text_input(field.replace("_", " ").title())
+
+with col2:
+    st.subheader("Generated Documentation")
+    if st.button("Generate"):
+        try:
+            # Build the prompt
+            prompt = template["prompt"].format(**inputs)
+            prompt += f"\nDetail level: {detail_level}\nAudience: {audience_level}"
+            
+            # Call the selected API
+            if "GPT" in selected_model:
+                response = openai.ChatCompletion.create(
+                    model=MODELS[selected_model],
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3
+                )
+                content = response.choices[0].message.content
+            else:
+                # Fallback to DeepSeek
+                headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
+                data = {
+                    "model": "deepseek-chat",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3
+                }
+                response = requests.post(
+                    "https://api.deepseek.com/v1/chat/completions",
+                    headers=headers,
+                    json=data
+                )
+                content = response.json()["choices"][0]["message"]["content"]
+            
+            st.session_state.generated_content = content
+            st.markdown(markdown2.markdown(content), unsafe_allow_html=True)
+            
+        except Exception as e:
+            st.error(f"Error generating documentation: {str(e)}")
+            st.session_state.generated_content = ""
+
+# Export options
+if st.session_state.generated_content:
+    st.divider()
+    st.subheader("Export Options")
+    
+    col_export1, col_export2, col_export3 = st.columns(3)
+    
+    with col_export1:
+        if st.button("Save as Markdown"):
+            with open("generated_docs.md", "w") as f:
+                f.write(st.session_state.generated_content)
+            st.success("Saved as generated_docs.md")
+    
+    with col_export2:
+        if st.button("Save as PDF"):
+            pdf = PdfWriter()
+            pdf.add_page()
+            pdf.write(BytesIO(st.session_state.generated_content.encode()))
+            with open("generated_docs.pdf", "wb") as f:
+                pdf.write(f)
+            st.success("Saved as generated_docs.pdf")
+    
+    with col_export3:
+        if st.button("Copy to Clipboard"):
+            st.session_state.generated_content = st.session_state.generated_content
+            st.code(st.session_state.generated_content, language="markdown")
+            st.success("Copied to clipboard!")
 
 
  
